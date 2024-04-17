@@ -21,6 +21,7 @@
 import os
 import pathlib
 import re
+import subprocess
 import sys
 from argparse import ArgumentParser
 from time import strftime, gmtime
@@ -35,7 +36,7 @@ from multiprocessing import Pool
 from uuid import uuid4
 from natsort import os_sorted
 from slugify import slugify as slugify_ext
-from PIL import Image, ImageFile
+from PIL import Image
 from subprocess import STDOUT, PIPE
 from psutil import virtual_memory, disk_usage
 from html import escape as hescape
@@ -49,8 +50,6 @@ from . import dualmetafix
 from . import metadata
 from . import kindle
 from . import __version__
-
-ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 
 def main(argv=None):
@@ -429,10 +428,11 @@ def buildEPUB(path, chapternames, tomenumber):
     f.writelines(["@page {\n",
                   "margin: 0;\n",
                   "}\n",
-                  "body {\n",
+                  "html, body {\n",
                   "display: block;\n",
                   "margin: 0;\n",
                   "padding: 0;\n",
+                  "font-size: 0;\n",
                   "}\n"])
     if options.iskindle and options.panelview:
         f.writelines(["#PV {\n",
@@ -557,11 +557,13 @@ def imgDirectoryProcessing(path):
         for afile in filenames:
             pagenumber += 1
             work.append([afile, dirpath, options])
+            if pagenumber==1:
+                pagenumber1=afile
     if GUI:
         GUI.progressBarTick.emit(str(pagenumber))
     if len(work) > 0:
         for i in work:
-            workerPool.apply_async(func=imgFileProcessing, args=(i,), callback=imgFileProcessingTick)
+            workerPool.apply_async(func=imgFileProcessing, args=(i,pagenumber1), callback=imgFileProcessingTick)
         workerPool.close()
         workerPool.join()
         if GUI and not GUI.conversionAlive:
@@ -593,21 +595,30 @@ def imgFileProcessingTick(output):
             workerPool.terminate()
 
 
-def imgFileProcessing(work):
+def imgFileProcessing(work, pagenumber1):
     try:
         afile = work[0]
         dirpath = work[1]
         opt = work[2]
         output = []
+
         workImg = image.ComicPageParser((dirpath, afile), opt)
         for i in workImg.payload:
             img = image.ComicPage(opt, *i)
             if opt.cropping == 2 and not opt.webtoon:
-                img.cropPageNumber(opt.croppingp, opt.croppingm)
+                if afile!=pagenumber1:
+                    img.cropMargin(opt.croppingp, opt.croppingm)
+                    img.remove_stray_pixels()
+                    img.cropMargin(opt.croppingp, opt.croppingm)
+                    img.detect_and_remove_page_number()
+                    img.cropMargin(opt.croppingp, opt.croppingm)
+                    img.detect_and_remove_page_number()
+                    img.cropPageNumber(opt.croppingp, opt.croppingm)
+                
             if opt.cropping > 0 and not opt.webtoon:
                 img.cropMargin(opt.croppingp, opt.croppingm)
             img.autocontrastImage()
-            img.resizeImage()
+            img.resizeImage(pagenumber1)
             if opt.forcepng and not opt.forcecolor:
                 img.quantizeImage()
             output.append(img.saveToDir())
@@ -689,6 +700,7 @@ def getOutputFilename(srcpath, wantedname, ext, tomenumber):
 
 def getComicInfo(path, originalpath):
     xmlPath = os.path.join(path, 'ComicInfo.xml')
+    options.authors = ['KCC']
     options.chapters = []
     options.summary = ''
     titleSuffix = ''
@@ -700,18 +712,13 @@ def getComicInfo(path, originalpath):
             options.title = os.path.splitext(os.path.basename(originalpath))[0]
     else:
         defaultTitle = False
-    if options.author == 'defaultauthor':
-        defaultAuthor = True
-        options.authors = ['KCC']
-    else:
-        defaultAuthor = False
-        options.authors = [options.author]
     if os.path.exists(xmlPath):
         try:
             xml = metadata.MetadataParser(xmlPath)
         except Exception:
             os.remove(xmlPath)
             return
+        options.authors = []
         if xml.data['Title']:
             options.title = hescape(xml.data['Title'])
         elif defaultTitle:
@@ -722,16 +729,14 @@ def getComicInfo(path, originalpath):
             if xml.data['Number']:
                 titleSuffix += ' #' + xml.data['Number'].zfill(3)
             options.title += titleSuffix
-        if defaultAuthor:    
-            options.authors = []
-            for field in ['Writers', 'Pencillers', 'Inkers', 'Colorists']:
-                for person in xml.data[field]:
-                    options.authors.append(hescape(person))
-            if len(options.authors) > 0:
-                options.authors = list(set(options.authors))
-                options.authors.sort()
-            else:
-                options.authors = ['KCC']
+        for field in ['Writers', 'Pencillers', 'Inkers', 'Colorists']:
+            for person in xml.data[field]:
+                options.authors.append(hescape(person))
+        if len(options.authors) > 0:
+            options.authors = list(set(options.authors))
+            options.authors.sort()
+        else:
+            options.authors = ['KCC']
         if xml.data['Bookmarks'] and options.batchsplit == 0:
             options.chapters = xml.data['Bookmarks']
         if xml.data['Summary']:
@@ -950,10 +955,10 @@ def makeParser():
     mandatory_options.add_argument("input", action="extend", nargs="*", default=None,
                                    help="Full path to comic folder or file(s) to be processed.")
 
-    main_options.add_argument("-p", "--profile", action="store", dest="profile", default="KV",
+    main_options.add_argument("-p", "--profile", action="store", dest="profile", default="KoF",
                               help="Device profile (Available options: K1, K2, K34, K578, KDX, KPW, KPW5, KV, KO, "
                                    "K11, KS, KoMT, KoG, KoGHD, KoA, KoAHD, KoAH2O, KoAO, KoN, KoC, KoL, KoF, KoS, KoE)"
-                                   " [Default=KV]")
+                                   " [Default=KoF]")
     main_options.add_argument("-m", "--manga-style", action="store_true", dest="righttoleft", default=False,
                               help="Manga style (right-to-left reading and splitting)")
     main_options.add_argument("-q", "--hq", action="store_true", dest="hq", default=False,
@@ -966,12 +971,10 @@ def makeParser():
                               help="the maximal size of output file in MB."
                                    " [Default=100MB for webtoon and 400MB for others]")
 
-    output_options.add_argument("-o", "--output", action="store", dest="output", default=None,
+    output_options.add_argument("-o", "--output", action="store", dest="output", default="D:\\Converted",
                                 help="Output generated file to specified directory or file")
     output_options.add_argument("-t", "--title", action="store", dest="title", default="defaulttitle",
                                 help="Comic title [Default=filename or directory name]")
-    output_options.add_argument("-a", "--author", action="store", dest="author", default="defaultauthor",
-                                help="Author name [Default=KCC]")
     output_options.add_argument("-f", "--format", action="store", dest="format", default="Auto",
                                 help="Output format (Available options: Auto, MOBI, EPUB, CBZ, KFX, MOBI+EPUB) "
                                      "[Default=Auto]")
@@ -1195,6 +1198,7 @@ def makeBook(source, qtgui=None):
                 filepath.append(getOutputFilename(source, options.output, '.cbz', ' ' + str(tomeNumber)))
             else:
                 filepath.append(getOutputFilename(source, options.output, '.cbz', ''))
+                
             makeZIP(tome + '_comic', os.path.join(tome, "OEBPS", "Images"))
         else:
             print("Creating EPUB file...")

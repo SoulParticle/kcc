@@ -18,11 +18,15 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
+import inspect
 import io
 import os
+import cv2
 import mozjpeg_lossless_optimization
 from PIL import Image, ImageOps, ImageStat, ImageChops, ImageFilter
+import numpy as np
 from .shared import md5Checksum
+from PIL import ImageEnhance
 
 AUTO_CROP_THRESHOLD = 0.015
 
@@ -244,6 +248,7 @@ class ComicPage:
         self.fill = fill
         self.rotated = False
         self.orgPath = os.path.join(path[0], path[1])
+        self.filename=path[1]
         if 'N' in mode:
             self.targetPath = os.path.join(path[0], os.path.splitext(path[1])[0]) + '-KCC'
         elif 'R' in mode:
@@ -307,7 +312,7 @@ class ComicPage:
         # Quantize is deprecated but new function call it internally anyway...
         self.image = self.image.quantize(palette=palImg)
 
-    def resizeImage(self):
+    def resizeImage(self, pagenumber1):
         ratio_device = float(self.size[1]) / float(self.size[0])
         ratio_image = float(self.image.size[1]) / float(self.image.size[0])
         method = self.resize_method()
@@ -323,7 +328,7 @@ class ComicPage:
         else: # if image bigger than device resolution or smaller with upscaling
             if abs(ratio_image - ratio_device) < AUTO_CROP_THRESHOLD:
                 self.image = ImageOps.fit(self.image, self.size, method=method)
-            elif self.opt.format == 'CBZ' or self.opt.kfx:
+            elif (self.opt.format == 'CBZ' and self.filename!=pagenumber1) or self.opt.kfx:
                 self.image = ImageOps.pad(self.image, self.size, method=method, color=self.fill)
             else:
                 self.image = ImageOps.contain(self.image, self.size, method=method)
@@ -355,6 +360,8 @@ class ComicPage:
         if (box_area / image_area) >= minimum:
             self.image = self.image.crop(box)
 
+
+
     def cropPageNumber(self, power, minimum):
         if self.fill != 'white':
             tmptmg = self.image.convert(mode='L')
@@ -366,6 +373,122 @@ class ComicPage:
         tmptmg = tmptmg.point(lambda x: (x >= 16 * power) and x)
         if tmptmg.getbbox():
             self.maybeCrop(tmptmg.getbbox(), minimum)
+
+    def remove_stray_pixels(self):
+        # Convert the image to grayscale
+        bw_img = self.image.convert("L")
+
+        # Get the dimensions of the image
+        width, height = bw_img.size
+
+        # Calculate the vertical distance representing % of the height from the bottom
+        percent=0.012
+        threshold=0.0003
+        bottom_x_percent_height = int(height * percent)
+
+        # Define the region of interest (bottom part of the image)
+        bottom_region = (0, height - bottom_x_percent_height, width, height)
+
+        # Crop the image to extract the bottom part
+        bottom_img = bw_img.crop(bottom_region)
+        top_x_percent_height = int(height * (1-percent))
+        top_region = (0, 0, width, top_x_percent_height)
+        #top_img = bw_img.crop(top_region)
+        # Initialize counters for pixels darker than 200 and total pixels
+        darker_than_200_count = 0
+        total_pixels_count = 0
+
+        # Iterate through each pixel in the bottom part of the image
+        for y in range(bottom_img.size[1]):  # Loop through each row
+            for x in range(bottom_img.size[0]):  # Loop through each pixel in the row
+                pixel_value = bottom_img.getpixel((x, y))  # Get the pixel value
+                total_pixels_count += 1  # Increment the total pixel count
+                if pixel_value < 200:  # Check if pixel value is darker than 200
+                    darker_than_200_count += 1  # Increment the counter
+        ratio=darker_than_200_count/total_pixels_count
+        if ratio < threshold:  # Adjust the threshold as needed
+            self.image=self.image.crop(top_region)
+        else:
+            lighter_than_60_count = 0
+
+            # Iterate through each pixel in the bottom part of the image
+            for y in range(bottom_img.size[1]):  # Loop through each row
+                for x in range(bottom_img.size[0]):  # Loop through each pixel in the row
+                    pixel_value = bottom_img.getpixel((x, y))  # Get the pixel value
+                    if pixel_value > 60:  # Check if pixel value is darker than 200
+                        lighter_than_60_count += 1  # Increment the counter
+            new_ratio=lighter_than_60_count/total_pixels_count
+            if new_ratio < threshold:  # Adjust the threshold as needed
+                self.image=self.image.crop(top_region)
+
+
+
+    def detect_and_remove_page_number(self):
+        check_pixels=0.988
+        remove_pixels=0.967
+        # Convert the Pillow image to a numpy array
+        img_array = np.array(self.image)
+
+        # Convert the image to grayscale
+        gray = cv2.cvtColor(img_array, cv2.COLOR_BGR2GRAY)
+
+        # Thresholding to obtain binary image
+        _, binary = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY_INV)
+
+        # Find contours
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        # Convert the image to grayscale
+        bw_img = self.image.convert("L")
+
+        # Get the dimensions of the image
+        width, height = bw_img.size
+
+        # Calculate the vertical distance representing % of the height from the bottom
+        percent=1-check_pixels
+        bottom_x_percent_height = int(height * percent)
+
+        # Define the region of interest (bottom part of the image)
+        bottom_region = (0, height - bottom_x_percent_height, width, height)
+
+        # Crop the image to extract the bottom part
+        bottom_img = bw_img.crop(bottom_region)
+
+
+        # Initialize counters for pixels darker than 200 and total pixels
+        darker_than_200_count = 0
+        total_pixels_count = 0
+
+        # Iterate through each pixel in the bottom part of the image
+        for y in range(bottom_img.size[1]):  # Loop through each row
+            for x in range(bottom_img.size[0]):  # Loop through each pixel in the row
+                pixel_value = bottom_img.getpixel((x, y))  # Get the pixel value
+                total_pixels_count += 1  # Increment the total pixel count
+                if pixel_value < 200:  # Check if pixel value is darker than 200
+                    darker_than_200_count += 1  # Increment the counter
+
+        # Calculate the ratio of black/gray pixels to white pixels
+        ratio = darker_than_200_count / total_pixels_count if total_pixels_count > 0 else 0
+        # print(self.filename)
+        # print(f"ratio:{ratio}")
+        # print("Darker pixels:", darker_than_200_count)
+        # print("Total pixels:", total_pixels_count)
+
+        # If the ratio exceeds a certain threshold, skip modifying that region
+        if ratio > 0.1:  # Adjust the threshold as needed
+            return
+
+        # Iterate through contours again to remove the page number
+        for contour in contours:
+            x, y, w, h = cv2.boundingRect(contour)
+            # Check if the contour is at the bottom of the image
+            if y > height * remove_pixels:
+                # Remove the page number region
+                img_array[y:y+h, x:x+w] = [255, 255, 255]  # Filling with white color
+
+        # Convert the modified numpy array back to a Pillow image
+        self.image = Image.fromarray(img_array)
+
 
     def cropMargin(self, power, minimum):
         if self.fill != 'white':
